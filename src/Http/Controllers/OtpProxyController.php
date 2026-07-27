@@ -9,6 +9,9 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+use MyOtpWay\Laravel\Exceptions\ConnectionFailedException;
+use MyOtpWay\Laravel\Exceptions\InvalidRequestException;
 use MyOtpWay\Laravel\Exceptions\MyOtpWayException;
 use MyOtpWay\Laravel\Facades\MyOtpWay;
 use MyOtpWay\Laravel\Support\ProxyErrorMapper;
@@ -17,6 +20,14 @@ use Throwable;
 
 class OtpProxyController extends Controller
 {
+    /**
+     * A connection failure gives us no expiry to work from, so the pending-send
+     * marker gets the upstream's own OTP lifetime (5 minutes). It is only ever
+     * an upper bound on how long /resend stays available for a send we cannot
+     * confirm happened.
+     */
+    private const ASSUMED_OTP_TTL_SECONDS = 300;
+
     public function send(Request $request): JsonResponse
     {
         return $this->dispatchSend($request, requirePriorSend: false);
@@ -29,14 +40,26 @@ class OtpProxyController extends Controller
 
     public function verify(Request $request): JsonResponse
     {
-        $validated = $request->validate([
+        // The gate runs before validation so an unauthorised caller learns
+        // nothing about the endpoint's field shape.
+        if (! MyOtpWay::passesAuthorization($request)) {
+            return response()->json(['error' => 'forbidden'], 403);
+        }
+
+        // Validator::make rather than $request->validate(): the latter throws
+        // ValidationException, and Laravel's handler would render its own
+        // {"message", "errors"} shape — a body with no `error` key, which every
+        // client of this contract reads.
+        $validator = Validator::make($request->all(), [
             'request_id' => ['required', 'string'],
             'code'       => ['required', 'string', 'min:4', 'max:8'],
         ]);
 
-        if (! MyOtpWay::passesAuthorization($request)) {
-            return response()->json(['error' => 'forbidden'], 403);
+        if ($validator->fails()) {
+            return response()->json(['error' => 'invalid_request'], 422);
         }
+
+        $validated = $validator->validated();
 
         try {
             $result = MyOtpWay::otp()->verify($validated['request_id'], $validated['code']);
@@ -53,15 +76,19 @@ class OtpProxyController extends Controller
 
     private function dispatchSend(Request $request, bool $requirePriorSend): JsonResponse
     {
-        $validated = $request->validate([
-            'phone' => ['required', 'string', 'regex:/^\+[1-9]\d{7,14}$/'],
-        ]);
-
-        $phone = $validated['phone'];
-
         if (! MyOtpWay::passesAuthorization($request)) {
             return response()->json(['error' => 'forbidden'], 403);
         }
+
+        $validator = Validator::make($request->all(), [
+            'phone' => ['required', 'string', 'regex:/^\+[1-9]\d{7,14}$/'],
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['error' => 'invalid_phone'], 422);
+        }
+
+        $phone = (string) $validator->validated()['phone'];
 
         if (! $this->countryAllowed($phone)) {
             Log::warning('my-otp-way: recipient country not allowed', [
@@ -89,6 +116,16 @@ class OtpProxyController extends Controller
                 language: (string) config('my-otp-way.proxy.language', 'ar'),
                 channel: (string) config('my-otp-way.proxy.channel', 'whatsapp'),
             );
+        } catch (ConnectionFailedException $e) {
+            // The one branch where delivery is genuinely unknown: the OTP may
+            // already have been sent and charged, which is why a POST is never
+            // retried. Skipping the cooldown here would let the per-IP throttle
+            // alone decide, i.e. five paid sends a minute to one phone. A clean
+            // 402/503 below is different — nothing was sent, so a legitimate
+            // user stays free to retry immediately.
+            $cooldown->start($phone, self::ASSUMED_OTP_TTL_SECONDS);
+
+            return $this->sanitise($e, ['phone' => $phone]);
         } catch (MyOtpWayException $e) {
             return $this->sanitise($e, ['phone' => $phone]);
         } catch (Throwable $e) {
@@ -112,11 +149,14 @@ class OtpProxyController extends Controller
      */
     private function sanitise(MyOtpWayException $exception, array $context): JsonResponse
     {
-        Log::error('my-otp-way request failed', $context + [
-            'exception' => $exception::class,
-            'status'    => $exception->httpStatus,
-            'message'   => $exception->getMessage(),
-        ]);
+        // The upstream body is the whole point of this log line: every
+        // non-recipient validation error becomes a blank 503, so a mistyped
+        // MY_OTP_WAY_TEMPLATE would otherwise read only "Validation failed."
+        // with no field name to act on.
+        $this->log($exception, $context + [
+            'status' => $exception->httpStatus,
+            'body'   => $exception->body,
+        ] + ($exception instanceof InvalidRequestException ? ['errors' => $exception->errors] : []));
 
         [$body, $status] = ProxyErrorMapper::forSend($exception);
 
@@ -131,13 +171,18 @@ class OtpProxyController extends Controller
      */
     private function sanitiseUnexpected(Throwable $exception, array $context): JsonResponse
     {
-        Log::error('my-otp-way request failed', $context + [
-            'exception' => $exception::class,
-            'status'    => 0,
-            'message'   => $exception->getMessage(),
-        ]);
+        $this->log($exception, $context + ['status' => 0]);
 
         return response()->json(['error' => 'service_unavailable'], 503);
+    }
+
+    /** The single Log::error both sanitisers share. */
+    private function log(Throwable $exception, array $context): void
+    {
+        Log::error('my-otp-way request failed', $context + [
+            'exception' => $exception::class,
+            'message'   => $exception->getMessage(),
+        ]);
     }
 
     private function countryAllowed(string $phone): bool

@@ -46,13 +46,114 @@ class ProxyRoutesTest extends TestCase
         Http::assertSent(fn ($request) => $request['template'] === 'verify_code');
     }
 
+    /**
+     * The body matters as much as the status. A mistyped phone number is the
+     * most common failure in an OTP flow, and Laravel's own validation shape
+     * ({"message", "errors"}) carries no `error` key — a client reading the
+     * contract would fall through to a generic "service unavailable" and tell
+     * the user the service is down.
+     */
     public function test_a_malformed_phone_is_rejected_before_any_call(): void
     {
         Http::fake();
 
-        $this->postJson('/my-otp/send', ['phone' => 'not-a-number'])->assertStatus(422);
+        $this->postJson('/my-otp/send', ['phone' => 'not-a-number'])
+            ->assertStatus(422)
+            ->assertExactJson(['error' => 'invalid_phone']);
 
         Http::assertNothingSent();
+    }
+
+    public function test_a_missing_phone_is_rejected_with_the_same_envelope(): void
+    {
+        Http::fake();
+
+        $this->postJson('/my-otp/send', [])
+            ->assertStatus(422)
+            ->assertExactJson(['error' => 'invalid_phone']);
+
+        Http::assertNothingSent();
+    }
+
+    public function test_verify_validation_failures_speak_the_error_contract(): void
+    {
+        Http::fake();
+
+        $this->postJson('/my-otp/verify', ['request_id' => 'req-1'])
+            ->assertStatus(422)
+            ->assertExactJson(['error' => 'invalid_request']);
+
+        $this->postJson('/my-otp/verify', ['request_id' => 'req-1', 'code' => '12'])
+            ->assertStatus(422)
+            ->assertExactJson(['error' => 'invalid_request']);
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * The per-IP throttle is defence layer 2 and fires in normal operation, so
+     * its 429 has to speak the contract rather than Laravel's own
+     * {"message": "Too Many Attempts."}.
+     */
+    public function test_the_throttle_speaks_the_error_contract(): void
+    {
+        $this->fakeSendSuccess();
+
+        // Distinct numbers: the per-phone cooldown would otherwise answer first.
+        for ($i = 0; $i < 5; $i++) {
+            $this->postJson('/my-otp/send', ['phone' => '+96477012345' . (10 + $i)])->assertStatus(202);
+        }
+
+        $response = $this->postJson('/my-otp/send', ['phone' => '+9647701234599'])
+            ->assertStatus(429)
+            ->assertJsonPath('error', 'rate_limited');
+
+        $this->assertIsInt($response->json('retry_after'));
+        $this->assertGreaterThan(0, $response->json('retry_after'));
+        $this->assertSame(['error', 'retry_after'], array_keys($response->json()));
+
+        Http::assertSentCount(5);
+    }
+
+    /**
+     * The one case where the OTP may already have been sent and charged. It is
+     * why a POST is never retried, and it must not also be the one case that
+     * skips the per-phone gate — with throttle:5,1 an upstream wobble would
+     * otherwise allow five paid sends a minute to one number.
+     */
+    public function test_a_connection_failure_still_starts_the_cooldown(): void
+    {
+        Http::fake(['api.test/*' => fn () => throw new \GuzzleHttp\Exception\ConnectException(
+            'timed out',
+            new \GuzzleHttp\Psr7\Request('POST', 'https://api.test/v1/otp/send'),
+        )]);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])
+            ->assertStatus(503)
+            ->assertExactJson(['error' => 'service_unavailable']);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])
+            ->assertStatus(429)
+            ->assertJsonPath('error', 'resend_too_soon');
+
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * A clean 402 is the opposite case: nothing was sent, nothing was charged,
+     * so a legitimate user must stay free to retry immediately.
+     */
+    public function test_a_clean_upstream_refusal_does_not_start_the_cooldown(): void
+    {
+        Http::fake(['api.test/*' => Http::response(['message' => 'Insufficient API key balance.'], 402)]);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])->assertStatus(503);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])
+            ->assertStatus(503)
+            ->assertExactJson(['error' => 'service_unavailable']);
+
+        Http::assertSentCount(2);
     }
 
     public function test_a_disallowed_country_is_rejected_before_any_call(): void
@@ -139,6 +240,30 @@ class ProxyRoutesTest extends TestCase
         $this->assertStringNotContainsString('12.4', $response->getContent());
 
         Log::shouldHaveReceived('error')->once();
+    }
+
+    /**
+     * The other half of sanitisation: what the client is denied, the developer's
+     * own log must still get. A misconfigured MY_OTP_WAY_TEMPLATE surfaces only
+     * as a blank 503, so without the upstream body the log reads "Validation
+     * failed." with no field name to act on.
+     */
+    public function test_the_sanitised_log_carries_the_real_upstream_body(): void
+    {
+        Log::spy();
+        Http::fake(['api.test/*' => Http::response([
+            'message' => 'Validation failed.', 'errors' => ['template' => ['The selected template is invalid.']],
+        ], 422)]);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])
+            ->assertStatus(503)
+            ->assertExactJson(['error' => 'service_unavailable']);
+
+        Log::shouldHaveReceived('error')->once()->withArgs(function ($message, $context) {
+            return $context['body']['errors']['template'][0] === 'The selected template is invalid.'
+                && $context['errors']['template'][0] === 'The selected template is invalid.'
+                && $context['status'] === 422;
+        });
     }
 
     public function test_verify_returns_true_on_success(): void
