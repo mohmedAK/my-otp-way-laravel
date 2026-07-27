@@ -2,11 +2,12 @@
     "name": "myotpway/laravel-sdk",
     "description": "Official MY-OTP-Way SDK for Laravel",
     "license": "MIT",
+    "version": "0.1.0",
     "require": {
         "php": "^8.2",
         "illuminate/support": "^12.0",
         "illuminate/http": "^12.0",
-        "nesbot/carbon": "^3.13"
+        "nesbot/carbon": "^3.0"
     },
     "require-dev": {
         "orchestra/testbench": "^10.0",
