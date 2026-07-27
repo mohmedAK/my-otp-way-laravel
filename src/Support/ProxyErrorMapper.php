@@ -28,12 +28,15 @@ final class ProxyErrorMapper
                 429,
             ],
 
-            // The recipient the caller supplied really was malformed; telling
-            // them so reveals nothing they did not already send us.
-            $exception instanceof InvalidRequestException => [
-                ['error' => 'invalid_phone'],
-                422,
-            ],
+            // The upstream blames a specific field. Only the recipient is the caller's
+            // to fix — template, channel and language come from the developer's config,
+            // and telling a user their phone is wrong because of a server misconfiguration
+            // sends them chasing a fault they cannot fix. Those fall through to 503.
+            $exception instanceof InvalidRequestException
+                && array_key_exists('to', $exception->errors) => [
+                    ['error' => 'invalid_phone'],
+                    422,
+                ],
 
             default => [['error' => 'service_unavailable'], 503],
         };

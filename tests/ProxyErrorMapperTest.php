@@ -58,6 +58,22 @@ class ProxyErrorMapperTest extends BaseTestCase
             $this->assertStringNotContainsString('ip address', $serialised, $exception::class);
             $this->assertStringNotContainsString('template', $serialised, $exception::class);
             $this->assertContains($status, [422, 429, 503], $exception::class);
+
+            $this->assertSame(
+                [],
+                array_diff(array_keys($body), ['error', 'retry_after']),
+                'Unexpected key in a sanitised body for ' . $exception::class,
+            );
+            $this->assertContains(
+                $body['error'],
+                ['rate_limited', 'invalid_phone', 'service_unavailable'],
+                $exception::class,
+            );
+            $this->assertStringNotContainsString(
+                strtolower($exception->getMessage()),
+                $serialised,
+                'Upstream prose reached the client for ' . $exception::class,
+            );
         }
     }
 
@@ -83,10 +99,28 @@ class ProxyErrorMapperTest extends BaseTestCase
 
     public function test_a_bad_recipient_passes_through_as_invalid_phone(): void
     {
-        [$body, $status] = ProxyErrorMapper::forSend(new InvalidRequestException('Validation failed.', ['to' => ['bad']]));
+        [$body, $status] = ProxyErrorMapper::forSend(
+            new InvalidRequestException('Validation failed.', ['to' => ['The to field format is invalid.']])
+        );
 
         $this->assertSame(['error' => 'invalid_phone'], $body);
         $this->assertSame(422, $status);
+    }
+
+    /**
+     * The template/channel/language fields come from the developer's own
+     * server-side config, not from the caller. Blaming the caller's phone
+     * for a config mistake would send real users chasing a fault they
+     * cannot fix, so these degrade to the same blank 503 as everything else.
+     */
+    public function test_a_non_recipient_validation_failure_degrades_to_service_unavailable(): void
+    {
+        [$body, $status] = ProxyErrorMapper::forSend(
+            new InvalidRequestException('Validation failed.', ['template' => ['The selected template is invalid.']])
+        );
+
+        $this->assertSame(['error' => 'service_unavailable'], $body);
+        $this->assertSame(503, $status);
     }
 
     public function test_the_balance_failure_becomes_a_blank_503(): void
