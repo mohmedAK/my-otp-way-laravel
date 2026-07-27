@@ -26,8 +26,6 @@ class DataTest extends TestCase
 
         $this->assertSame('abc-123', $result->requestId);
         $this->assertSame('2026-07-27 12:05:00', $result->expiresAt->format('Y-m-d H:i:s'));
-
-        Carbon::setTestNow();
     }
 
     public function test_verify_result_reads_a_success(): void
@@ -93,5 +91,11 @@ class DataTest extends TestCase
         $this->assertSame('sent', $status->status);
         $this->assertSame('2026-07-27 12:00:00', $status->sentAt?->format('Y-m-d H:i:s'));
         $this->assertNull($status->deliveredAt);
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        parent::tearDown();
     }
 }
