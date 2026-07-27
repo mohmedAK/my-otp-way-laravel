@@ -1,0 +1,29 @@
+{
+    "name": "myotpway/laravel-sdk",
+    "description": "Official MY-OTP-Way SDK for Laravel",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^12.0",
+        "illuminate/http": "^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0",
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": { "MyOtpWay\\Laravel\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "MyOtpWay\\Laravel\\Tests\\": "tests/" }
+    },
+    "extra": {
+        "laravel": {
+            "providers": ["MyOtpWay\\Laravel\\MyOtpWayServiceProvider"],
+            "aliases": { "MyOtpWay": "MyOtpWay\\Laravel\\Facades\\MyOtpWay" }
+        }
+    },
+    "config": { "sort-packages": true },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
