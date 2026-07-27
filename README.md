@@ -78,7 +78,7 @@ Everything that reaches the API and fails throws a subclass of
 | `InvalidRequestException` | 422 | `errors` |
 | `RateLimitException` | 429 | `retryAfter` |
 | `NoSenderAvailableException` | 503 | — |
-| `ConnectionFailedException` | — | thrown when the HTTP call itself fails (timeout, DNS, ...) |
+| `ConnectionFailedException` | 0 | thrown when the HTTP call itself fails (timeout, DNS, ...) — no response was ever received, so `httpStatus` is the constructor's default `0`, not a real HTTP status |
 | `MyOtpWayException` | whatever the API sent | fallback for a status the SDK doesn't recognise yet |
 
 **A `POST` is never retried.** If the connection drops mid-request the
@@ -112,7 +112,8 @@ They come with:
 
 - **Per-route throttling** (`throttle:5,1` / `3,1` / `10,1` by default,
   configurable under `my-otp-way.proxy.throttle`).
-- **A 60-second per-phone resend cooldown**, plus a longer-lived "pending
+- **A per-phone resend cooldown** — 60 seconds by default, configurable via
+  `my-otp-way.proxy.resend_cooldown_seconds` — plus a longer-lived "pending
   send" marker so `/resend` can't be called as a second `/send` with a
   looser throttle. See the cache caveat below.
 - **A country allow-list** — `/send` and `/resend` reject a phone number that
@@ -197,6 +198,13 @@ By default every request is allowed — OTP send typically happens before
 login (e.g. on a registration screen), so requiring your own app's auth here
 would break that flow.
 
+**The callback is stored on a process-static property**
+(`MyOtpWayManager::$authorizeCallback`), not per-request state, so it
+survives Laravel's per-test container rebuild. Register it once in your
+`AppServiceProvider::boot()` and forget about it — but if you ever call
+`authorizeUsing()` inside a test, it leaks into every test that runs after
+it in the same process unless you clear it (see Testing, below).
+
 ## Testing
 
 ```php
@@ -228,6 +236,23 @@ provides:
 **Note:** `MyOtpWay::fake()` only replaces `otp()`. `MyOtpWay::messages()`
 and `MyOtpWay::balance()` still hit the real HTTP client, so fake those with
 Laravel's own `Http::fake()` if your test path touches them.
+
+**If any test in your suite calls `authorizeUsing()`, clear it in
+`tearDown()`.** The callback lives on a static property
+(`MyOtpWayManager::$authorizeCallback`), so it is not reset by Laravel's
+usual per-test container rebuild and will silently apply to every test that
+runs afterward in the same process — typically surfacing as an unexplained
+403 in an unrelated test. The package's own base test case does exactly
+this:
+
+```php
+protected function tearDown(): void
+{
+    $this->app->make('my-otp-way')->forgetAuthorization();
+
+    parent::tearDown();
+}
+```
 
 ## Observability
 
