@@ -67,6 +67,37 @@ class ProxyRoutesTest extends TestCase
         Http::assertNothingSent();
     }
 
+    /**
+     * mergeConfigFrom is a shallow array_merge: a host that publishes and then
+     * rewrites its own `proxy` block can drop `allowed_country_prefixes`
+     * entirely. That must fail closed (default ['+964']), never open.
+     */
+    public function test_an_absent_allow_list_key_still_blocks_disallowed_countries(): void
+    {
+        Http::fake();
+        config()->set('my-otp-way.proxy', ['prefix' => 'my-otp', 'template' => 'verify_code']);
+
+        $this->postJson('/my-otp/send', ['phone' => '+441234567890'])
+            ->assertStatus(422)
+            ->assertJsonPath('error', 'country_not_allowed');
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * An explicitly empty list is the documented opt-out for developers who
+     * serve customers abroad, distinct from an absent key (which stays safe).
+     */
+    public function test_an_explicitly_empty_allow_list_permits_every_country(): void
+    {
+        $this->fakeSendSuccess();
+        config()->set('my-otp-way.proxy.allowed_country_prefixes', []);
+
+        $this->postJson('/my-otp/send', ['phone' => '+441234567890'])->assertStatus(202);
+
+        Http::assertSentCount(1);
+    }
+
     public function test_a_second_send_within_the_cooldown_is_refused(): void
     {
         $this->fakeSendSuccess();

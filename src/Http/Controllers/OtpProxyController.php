@@ -85,9 +85,9 @@ class OtpProxyController extends Controller
         try {
             $result = MyOtpWay::otp()->send(
                 to: $phone,
-                template: (string) config('my-otp-way.proxy.template'),
-                language: (string) config('my-otp-way.proxy.language'),
-                channel: (string) config('my-otp-way.proxy.channel'),
+                template: (string) config('my-otp-way.proxy.template', 'verify_code'),
+                language: (string) config('my-otp-way.proxy.language', 'ar'),
+                channel: (string) config('my-otp-way.proxy.channel', 'whatsapp'),
             );
         } catch (MyOtpWayException $e) {
             return $this->sanitise($e, ['phone' => $phone]);
@@ -101,7 +101,7 @@ class OtpProxyController extends Controller
         return response()->json([
             'request_id'          => $result->requestId,
             'expires_at'          => $result->expiresAt->toIso8601String(),
-            'resend_available_in' => (int) config('my-otp-way.proxy.resend_cooldown_seconds'),
+            'resend_available_in' => (int) config('my-otp-way.proxy.resend_cooldown_seconds', 60),
         ], 202);
     }
 
@@ -142,7 +142,14 @@ class OtpProxyController extends Controller
 
     private function countryAllowed(string $phone): bool
     {
-        $prefixes = (array) config('my-otp-way.proxy.allowed_country_prefixes', []);
+        // mergeConfigFrom is a shallow array_merge, so a host that publishes and
+        // then rewrites its own `proxy` block can drop this key entirely rather
+        // than falling back to the package default — the default of ['+964']
+        // here, not an empty array, is what keeps an *absent* key safe.
+        //
+        // An explicitly empty list is a different thing: the deliberate opt-out
+        // for developers serving customers abroad.
+        $prefixes = (array) config('my-otp-way.proxy.allowed_country_prefixes', ['+964']);
 
         if ($prefixes === []) {
             return true;

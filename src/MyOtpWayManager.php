@@ -49,7 +49,11 @@ class MyOtpWayManager
         return Balance::fromArray($this->client()->get('balance')->body);
     }
 
-    /** Registers the three public proxy routes. Call from routes/web.php or routes/api.php. */
+    /**
+     * Registers the three public proxy routes. Call from routes/api.php —
+     * not routes/web.php, whose session/CSRF middleware would 419 every
+     * POST from a mobile client that can't carry a CSRF token.
+     */
     public function routes(): void
     {
         require __DIR__ . '/../routes/proxy.php';
