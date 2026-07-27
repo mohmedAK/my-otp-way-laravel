@@ -8,10 +8,13 @@ use Illuminate\Http\Request;
 use MyOtpWay\Laravel\Data\Balance;
 use MyOtpWay\Laravel\Resources\MessageResource;
 use MyOtpWay\Laravel\Resources\OtpResource;
+use MyOtpWay\Laravel\Testing\MyOtpWayFake;
 
 class MyOtpWayManager
 {
     private ?Client $client = null;
+
+    private ?MyOtpWayFake $fake = null;
 
     /** @var (callable(Request): bool)|null */
     private static $authorizeCallback = null;
@@ -34,9 +37,14 @@ class MyOtpWayManager
         );
     }
 
-    public function otp(): OtpResource
+    public function otp(): OtpResource|MyOtpWayFake
     {
-        return new OtpResource($this->client());
+        return $this->fake ?? new OtpResource($this->client());
+    }
+
+    public function fake(): MyOtpWayFake
+    {
+        return $this->fake = new MyOtpWayFake();
     }
 
     public function messages(): MessageResource
