@@ -84,7 +84,9 @@ Everything that reaches the API and fails throws a subclass of
 **A `POST` is never retried.** If the connection drops mid-request the
 message may already have been sent and charged, so the client does not retry
 it for you — retrying yourself would risk billing twice. `GET` requests (used
-by `status()` and `balance()`) are retried automatically.
+by `status()` and `balance()`) retry twice, **on a connection failure only** —
+never on an HTTP response. A `401` or a `404` is an answer, not a wobble, so
+it comes straight back after one round trip.
 
 ## Mobile apps
 
@@ -110,12 +112,20 @@ That publishes three public, unauthenticated routes:
 
 They come with:
 
-- **Per-route throttling** (`throttle:5,1` / `3,1` / `10,1` by default,
-  configurable under `my-otp-way.proxy.throttle`).
+- **Per-route throttling** (`5,1` / `3,1` / `10,1` by default, configurable
+  under `my-otp-way.proxy.throttle`). These routes use the package's own
+  `ProxyThrottle` middleware rather than the `throttle` alias: it counts
+  identically, but answers `429 {"error": "rate_limited", "retry_after"}`
+  instead of Laravel's `{"message": "Too Many Attempts."}`, so a rejection
+  every client is expected to hit still speaks the error contract. Your own
+  routes are untouched.
 - **A per-phone resend cooldown** — 60 seconds by default, configurable via
   `my-otp-way.proxy.resend_cooldown_seconds` — plus a longer-lived "pending
   send" marker so `/resend` can't be called as a second `/send` with a
-  looser throttle. See the cache caveat below.
+  looser throttle. See the cache caveat below. The cooldown also starts when
+  the call to the API **fails to connect**: delivery is unknown there, the
+  OTP may already have been sent and charged, and that is exactly when the
+  per-phone gate matters most.
 - **A country allow-list** — `/send` and `/resend` reject a phone number that
   doesn't match before any API call is made.
 - **A server-chosen template/language/channel** — always the developer's
@@ -160,33 +170,42 @@ the phone's `+` prefix before any API call:
 
 ### Error contract
 
-`/send` and `/resend` validate the `phone` field first
-(`regex:/^\+[1-9]\d{7,14}$/`); a malformed number never reaches the code
-below and instead gets Laravel's own default validation-error response
-(`422` with a `{"message": ..., "errors": {"phone": [...] }}` shape) rather
-than the sanitised envelope. Likewise `/verify` validates `request_id` and
-`code` (4–8 chars) the same way. Everything past that point returns the
-sanitised `{"error": "<code>" }` shape below:
+**Every non-2xx response from these three routes carries an `error` key.**
+That includes the two cases the framework would otherwise answer in its own
+shape: a request that fails local validation (a mistyped phone number is the
+most common failure in an OTP flow) and a throttle rejection. A client can
+read `body['error']` unconditionally.
+
+`/send` and `/resend` accept only `phone` (`regex:/^\+[1-9]\d{7,14}$/`);
+`/verify` accepts `request_id` and `code` (4–8 chars). Anything else in the
+body is ignored.
 
 | `error` | HTTP status | Extra fields | When |
 |---|---|---|---|
-| `forbidden` | 403 | — | `MyOtpWay::authorizeUsing()` callback rejected the request |
-| `country_not_allowed` | 422 | — | phone doesn't match the allow-list |
+| `forbidden` | 403 | — | `MyOtpWay::authorizeUsing()` callback rejected the request. Checked **before** validation, so an unauthorised caller learns nothing about the field shape |
+| `invalid_phone` | 422 | — | `/send`, `/resend` — `phone` missing or failing the regex, *or* the upstream API rejected the recipient specifically |
+| `country_not_allowed` | 422 | — | `/send`, `/resend` — phone doesn't match the allow-list |
 | `nothing_to_resend` | 422 | — | `/resend` called with no prior `/send` for this phone |
-| `resend_too_soon` | 429 | `retry_after` (seconds) | still inside the cooldown window |
-| `rate_limited` | 429 | `retry_after` (seconds) | the upstream API itself rate-limited the request |
-| `invalid_phone` | 422 | — | the upstream API rejected the recipient specifically (not caught by the regex above) |
+| `resend_too_soon` | 429 | `retry_after` (seconds) | `/send`, `/resend` — still inside the per-phone cooldown window |
+| `invalid_request` | 422 | — | `/verify` — `request_id` or `code` missing or malformed |
+| `rate_limited` | 429 | `retry_after` (seconds) | the per-IP throttle on any of the three routes, *or* the upstream API itself rate-limiting the request |
 | `service_unavailable` | 503 | — | **everything else** — invalid/revoked key, insufficient balance, suspended account, IP not allowed, SMS disabled, template not found, a non-recipient validation error, no sender available, a connection failure, or any unrecognised exception. Nothing here ever reveals *why* |
-| `invalid_code` | 422 | `attempts_remaining` | `/verify` — wrong code |
-| `expired` | 422 | — | `/verify` — OTP expired |
-| `already_used` | 422 | — | `/verify` — OTP already verified |
-| `not_found` | 422 | — | `/verify` — unknown `request_id` |
-| `too_many_attempts` | 429 | — | `/verify` — attempt limit reached (a lockout, not a one-off wrong code) |
+| `invalid_code` | 422 | `verified: false`, `attempts_remaining` when the API reports it | `/verify` — wrong code |
+| `expired` | 422 | `verified: false` | `/verify` — OTP expired |
+| `already_used` | 422 | `verified: false` | `/verify` — OTP already verified |
+| `not_found` | 422 | `verified: false` | `/verify` — unknown `request_id` |
+| `too_many_attempts` | 429 | `verified: false` | `/verify` — attempt limit reached (a lockout, not a one-off wrong code) |
+
+A successful `/verify` is the one response with no `error` key at all:
+`200 {"verified": true}`.
 
 `service_unavailable` is deliberately the default arm: an exception this SDK
 doesn't recognise yet still degrades to it rather than passing through,
 which is what keeps a forgotten case from ever leaking a balance or an
-internal message.
+internal message. Every sanitised failure is written to **your** log via
+`Log::error` with the real upstream body and, for a validation failure, its
+`errors` bag — so a mistyped `MY_OTP_WAY_TEMPLATE` is diagnosable even though
+the client only ever saw a blank 503.
 
 Restrict who may call the proxy routes at all:
 
@@ -198,12 +217,10 @@ By default every request is allowed — OTP send typically happens before
 login (e.g. on a registration screen), so requiring your own app's auth here
 would break that flow.
 
-**The callback is stored on a process-static property**
-(`MyOtpWayManager::$authorizeCallback`), not per-request state, so it
-survives Laravel's per-test container rebuild. Register it once in your
-`AppServiceProvider::boot()` and forget about it — but if you ever call
-`authorizeUsing()` inside a test, it leaks into every test that runs after
-it in the same process unless you clear it (see Testing, below).
+The callback lives on the `my-otp-way` singleton, so it lasts exactly as long
+as the container does. Register it once in your `AppServiceProvider::boot()`;
+a test that registers its own is reset with the container, like anything else
+bound there.
 
 ## Testing
 
@@ -236,23 +253,6 @@ provides:
 **Note:** `MyOtpWay::fake()` only replaces `otp()`. `MyOtpWay::messages()`
 and `MyOtpWay::balance()` still hit the real HTTP client, so fake those with
 Laravel's own `Http::fake()` if your test path touches them.
-
-**If any test in your suite calls `authorizeUsing()`, clear it in
-`tearDown()`.** The callback lives on a static property
-(`MyOtpWayManager::$authorizeCallback`), so it is not reset by Laravel's
-usual per-test container rebuild and will silently apply to every test that
-runs afterward in the same process — typically surfacing as an unexplained
-403 in an unrelated test. The package's own base test case does exactly
-this:
-
-```php
-protected function tearDown(): void
-{
-    $this->app->make('my-otp-way')->forgetAuthorization();
-
-    parent::tearDown();
-}
-```
 
 ## Observability
 
