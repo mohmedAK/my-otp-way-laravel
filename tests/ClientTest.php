@@ -10,6 +10,7 @@ use MyOtpWay\Laravel\Client;
 use MyOtpWay\Laravel\Events\MyOtpWayRequestSent;
 use MyOtpWay\Laravel\Exceptions\ConnectionFailedException;
 use MyOtpWay\Laravel\Exceptions\InsufficientBalanceException;
+use MyOtpWay\Laravel\Exceptions\InvalidApiKeyException;
 
 class ClientTest extends TestCase
 {
@@ -102,6 +103,37 @@ class ClientTest extends TestCase
         }
 
         Http::assertSentCount(3); // one attempt plus two retries
+    }
+
+    /**
+     * A GET retries on connection failure only, never on an HTTP response.
+     * Without the `when` clause a PendingRequest treats every non-successful
+     * response as retry-worthy, so a revoked key would cost three round trips
+     * to reach the same 401 — and an `allow`ed status would spend its retries
+     * before the caller ever saw it.
+     */
+    public function test_a_get_is_not_retried_on_an_http_error_status(): void
+    {
+        Http::fake(['api.test/*' => Http::response(['message' => 'Unauthenticated.'], 401)]);
+
+        try {
+            $this->client()->get('balance');
+            $this->fail('Expected an InvalidApiKeyException.');
+        } catch (InvalidApiKeyException) {
+            // expected
+        }
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_an_allowed_status_on_a_get_burns_no_retries(): void
+    {
+        Http::fake(['api.test/*' => Http::response(['status' => 'not_found'], 404)]);
+
+        $response = $this->client()->get('otp/req-1/status', allow: [404]);
+
+        $this->assertSame(404, $response->status);
+        Http::assertSentCount(1);
     }
 
     public function test_it_fires_an_event_for_every_call(): void

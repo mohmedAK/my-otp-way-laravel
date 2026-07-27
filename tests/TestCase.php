@@ -19,11 +19,4 @@ abstract class TestCase extends Orchestra
         $app['config']->set('my-otp-way.base_url', 'https://api.test/v1');
         $app['config']->set('my-otp-way.api_key', 'test-key');
     }
-
-    protected function tearDown(): void
-    {
-        $this->app->make('my-otp-way')->forgetAuthorization();
-
-        parent::tearDown();
-    }
 }

@@ -67,8 +67,16 @@ final class Client
             ])
             ->timeout($this->timeout);
 
-        // Only GET retries. A POST that times out may already have been
-        // delivered and charged, so a retry bills twice for one message.
-        return $method === 'GET' ? $request->retry(3, 100, throw: false) : $request;
+        // Only GET retries, and only on a transport failure. Without the `when`
+        // clause a PendingRequest treats any non-successful *response* as
+        // retry-worthy too, so a 401 would burn three requests to reach the same
+        // answer — and an `allow`ed status would spend its retries before the
+        // caller ever saw it.
+        //
+        // A POST is never retried at all: one that times out may already have
+        // been delivered and charged, so a retry bills twice for one message.
+        return $method === 'GET'
+            ? $request->retry(3, 100, when: fn ($e) => $e instanceof HttpConnectionException, throw: false)
+            : $request;
     }
 }

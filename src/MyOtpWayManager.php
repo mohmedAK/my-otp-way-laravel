@@ -17,7 +17,7 @@ class MyOtpWayManager
     private ?MyOtpWayFake $fake = null;
 
     /** @var (callable(Request): bool)|null */
-    private static $authorizeCallback = null;
+    private $authorizeCallback = null;
 
     public function __construct(private readonly array $config)
     {
@@ -67,10 +67,17 @@ class MyOtpWayManager
         require __DIR__ . '/../routes/proxy.php';
     }
 
-    /** @param  callable(Request): bool  $callback */
+    /**
+     * Registered on the singleton, so it lives exactly as long as the container
+     * does: for the whole process under Octane, and for one test under
+     * Laravel's per-test container rebuild — which is what a test that calls
+     * this wants.
+     *
+     * @param  callable(Request): bool  $callback
+     */
     public function authorizeUsing(callable $callback): void
     {
-        self::$authorizeCallback = $callback;
+        $this->authorizeCallback = $callback;
     }
 
     /**
@@ -80,12 +87,6 @@ class MyOtpWayManager
      */
     public function passesAuthorization(Request $request): bool
     {
-        return self::$authorizeCallback === null || (bool) call_user_func(self::$authorizeCallback, $request);
-    }
-
-    /** Test helper: forget any callback registered by authorizeUsing(). */
-    public function forgetAuthorization(): void
-    {
-        self::$authorizeCallback = null;
+        return $this->authorizeCallback === null || (bool) call_user_func($this->authorizeCallback, $request);
     }
 }
