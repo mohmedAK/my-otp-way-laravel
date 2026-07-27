@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace MyOtpWay\Laravel;
 
+use MyOtpWay\Laravel\Data\Balance;
+use MyOtpWay\Laravel\Resources\MessageResource;
 use MyOtpWay\Laravel\Resources\OtpResource;
 
 class MyOtpWayManager
@@ -31,5 +33,15 @@ class MyOtpWayManager
     public function otp(): OtpResource
     {
         return new OtpResource($this->client());
+    }
+
+    public function messages(): MessageResource
+    {
+        return new MessageResource($this->client());
+    }
+
+    public function balance(): Balance
+    {
+        return Balance::fromArray($this->client()->get('balance')->body);
     }
 }
