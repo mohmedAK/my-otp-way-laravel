@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MyOtpWay\Laravel;
 
+use Illuminate\Http\Request;
 use MyOtpWay\Laravel\Data\Balance;
 use MyOtpWay\Laravel\Resources\MessageResource;
 use MyOtpWay\Laravel\Resources\OtpResource;
@@ -11,6 +12,9 @@ use MyOtpWay\Laravel\Resources\OtpResource;
 class MyOtpWayManager
 {
     private ?Client $client = null;
+
+    /** @var (callable(Request): bool)|null */
+    private static $authorizeCallback = null;
 
     public function __construct(private readonly array $config)
     {
@@ -43,5 +47,33 @@ class MyOtpWayManager
     public function balance(): Balance
     {
         return Balance::fromArray($this->client()->get('balance')->body);
+    }
+
+    /** Registers the three public proxy routes. Call from routes/web.php or routes/api.php. */
+    public function routes(): void
+    {
+        require __DIR__ . '/../routes/proxy.php';
+    }
+
+    /** @param  callable(Request): bool  $callback */
+    public function authorizeUsing(callable $callback): void
+    {
+        self::$authorizeCallback = $callback;
+    }
+
+    /**
+     * Allows everything by default. OTP send usually happens before login, on
+     * the registration screen, so requiring the host application's own auth
+     * would break the primary use case.
+     */
+    public function passesAuthorization(Request $request): bool
+    {
+        return self::$authorizeCallback === null || (bool) call_user_func(self::$authorizeCallback, $request);
+    }
+
+    /** Test helper: forget any callback registered by authorizeUsing(). */
+    public function forgetAuthorization(): void
+    {
+        self::$authorizeCallback = null;
     }
 }
