@@ -6,13 +6,177 @@ namespace MyOtpWay\Laravel\Tests;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Testing\TestResponse;
 use MyOtpWay\Laravel\Facades\MyOtpWay;
 
 class ProxyRoutesTest extends TestCase
 {
+    use SharedContract;
+
     protected function defineRoutes($router): void
     {
         MyOtpWay::routes();
+    }
+
+    /**
+     * Holds a real response against the shared fixture: the code, the HTTP
+     * status the fixture froze, and — when the fixture says the code carries
+     * one — the `extra` field, looked up BY NAME FROM THE FIXTURE.
+     *
+     * Hard-coding either the status or the key name here would make this a
+     * fourth copy of the contract rather than a check on it. Six of the
+     * thirteen codes never touch ProxyErrorMapper, so an HTTP response is the
+     * only place they can honestly be observed.
+     */
+    private function assertMatchesTheSharedContract(string $code, TestResponse $response): void
+    {
+        $entry  = $this->contractEntry($code);
+        $body   = (array) $response->json();
+        $status = $response->getStatusCode();
+
+        $this->assertSame(
+            $code,
+            $body['error'] ?? null,
+            "Expected this response to carry the contract code \"{$code}\". Body: " . json_encode($body),
+        );
+
+        $this->assertSame(
+            $entry['status'],
+            $status,
+            "The shared contract fixture freezes \"{$code}\" at HTTP {$entry['status']}, but this package "
+            . "answered {$status}. One of the two is lying to every client written against the contract — "
+            . 'and a published mobile app cannot be corrected without an app-store release.',
+        );
+
+        $extra = $entry['extra'] ?? null;
+
+        if ($extra === null) {
+            return;
+        }
+
+        $this->assertArrayHasKey(
+            $extra,
+            $body,
+            "The shared contract fixture says \"{$code}\" carries \"{$extra}\", but this package wrote ["
+            . implode(', ', array_keys($body))
+            . ']. The Flutter package reads that exact key and builds its exception from it — rename the key '
+            . 'here and every published app gets a null field forever.',
+        );
+    }
+
+    /**
+     * The one the mapper cannot reach. `resend_too_soon` and its `retry_after`
+     * are written by the controller, so nothing outside a real request can
+     * observe either; ContractFixtureTest defers to this method by name.
+     *
+     * `retry_after` is what a resend countdown is built from. If it goes out
+     * under a different name, the countdown never counts down.
+     */
+    public function test_the_resend_cooldown_refusal_matches_the_shared_contract(): void
+    {
+        $this->fakeSendSuccess();
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])->assertStatus(202);
+
+        $this->assertMatchesTheSharedContract(
+            'resend_too_soon',
+            $this->postJson('/my-otp/send', ['phone' => '+9647701234567']),
+        );
+
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * The other four codes the controller writes itself. Their statuses were
+     * asserted nowhere before: the mapper never produces them, so the fixture
+     * could have started claiming any number at all and both suites would have
+     * stayed green while the next client coded against a status the server
+     * never sends.
+     *
+     * Split across two methods because `ThrottleRequests` keys its counter on
+     * `domain|ip`, not on the path: the three routes share ONE counter and
+     * differ only in the ceiling they check it against (send 5, resend 3,
+     * verify 10). Three send requests here, two in the sibling method.
+     */
+    public function test_the_send_refusals_this_controller_writes_match_the_shared_contract(): void
+    {
+        Http::fake();
+
+        MyOtpWay::authorizeUsing(fn ($request) => $request->header('X-App-Token') === 'let-me-in');
+
+        $this->assertMatchesTheSharedContract(
+            'forbidden',
+            $this->postJson('/my-otp/send', ['phone' => '+9647701234567']),
+        );
+
+        MyOtpWay::authorizeUsing(fn () => true);
+
+        $this->assertMatchesTheSharedContract(
+            'invalid_phone',
+            $this->postJson('/my-otp/send', ['phone' => 'not-a-number']),
+        );
+
+        config()->set('my-otp-way.proxy.allowed_country_prefixes', ['+964']);
+
+        $this->assertMatchesTheSharedContract(
+            'country_not_allowed',
+            $this->postJson('/my-otp/send', ['phone' => '+441234567890']),
+        );
+
+        Http::assertNothingSent();
+    }
+
+    /** @see test_the_send_refusals_this_controller_writes_match_the_shared_contract */
+    public function test_the_resend_and_verify_refusals_match_the_shared_contract(): void
+    {
+        Http::fake();
+
+        $this->assertMatchesTheSharedContract(
+            'nothing_to_resend',
+            $this->postJson('/my-otp/resend', ['phone' => '+9647701234567']),
+        );
+
+        $this->assertMatchesTheSharedContract(
+            'invalid_request',
+            $this->postJson('/my-otp/verify', ['request_id' => 'req-1']),
+        );
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * `rate_limited` reaches the wire from two unrelated places — the mapper,
+     * when the upstream refuses, and ProxyThrottle, when this app's own per-IP
+     * limiter fires. Only the first was held against the fixture.
+     */
+    public function test_the_throttle_refusal_matches_the_shared_contract(): void
+    {
+        $this->fakeSendSuccess();
+
+        // Distinct numbers: the per-phone cooldown would otherwise answer first.
+        for ($i = 0; $i < 5; $i++) {
+            $this->postJson('/my-otp/send', ['phone' => '+96477012345' . (10 + $i)])->assertStatus(202);
+        }
+
+        $this->assertMatchesTheSharedContract(
+            'rate_limited',
+            $this->postJson('/my-otp/send', ['phone' => '+9647701234599']),
+        );
+    }
+
+    /**
+     * The sanitiser's own blank 503 — written by the controller, not the mapper,
+     * and the response every unrecognised failure collapses into.
+     */
+    public function test_the_sanitised_failure_matches_the_shared_contract(): void
+    {
+        Log::spy();
+        Http::fake(['api.test/*' => fn () => throw new \RuntimeException('internal detail that must not escape')]);
+
+        $this->assertMatchesTheSharedContract(
+            'service_unavailable',
+            $this->postJson('/my-otp/send', ['phone' => '+9647701234567']),
+        );
     }
 
     private function fakeSendSuccess(): void
