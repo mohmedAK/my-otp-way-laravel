@@ -93,10 +93,14 @@ class ProxyRoutesTest extends TestCase
      * stayed green while the next client coded against a status the server
      * never sends.
      *
-     * Split across two methods because `ThrottleRequests` keys its counter on
-     * `domain|ip`, not on the path: the three routes share ONE counter and
-     * differ only in the ceiling they check it against (send 5, resend 3,
-     * verify 10). Three send requests here, two in the sibling method.
+     * Split across two methods because these five requests were once counted
+     * against ONE shared throttle counter (`ThrottleRequests` keys on
+     * `domain|ip`, not on the path), and resend's ceiling of 3 would have
+     * refused the fourth. `ProxyThrottle::resolveRequestSignature` now gives
+     * each route its own counter, so the split is no longer load-bearing —
+     * three sends here (ceiling 5) and one resend plus one verify next door
+     * would pass either way. Kept apart because two focused methods name their
+     * failures better than one long one.
      */
     public function test_the_send_refusals_this_controller_writes_match_the_shared_contract(): void
     {
@@ -277,6 +281,97 @@ class ProxyRoutesTest extends TestCase
         $this->assertSame(['error', 'retry_after'], array_keys($response->json()));
 
         Http::assertSentCount(5);
+    }
+
+    /**
+     * The regression this file exists to catch.
+     *
+     * `ThrottleRequests::resolveRequestSignature()` keys on `domain|ip` alone —
+     * no path, no route name — so three routes carrying three different
+     * ceilings share ONE counter and differ only in the number they compare it
+     * against. That turns the *smallest* ceiling into a cap on the other two:
+     *
+     *   send (1) → mistyped code, verify (2) → mistyped again, verify (3) →
+     *   user taps Resend → shared counter is 3, resend's ceiling is 3 → 429.
+     *
+     * An ordinary user who mistyped twice cannot resend at all, with no
+     * attacker anywhere in the story, and nothing in `throttle.resend => '3,1'`
+     * hints at it. Each route must count its own traffic.
+     */
+    public function test_spending_another_routes_budget_does_not_close_resend(): void
+    {
+        // The per-phone gate is a separate defence with its own tests; zero it
+        // here so the only thing that can refuse the resend is the throttle.
+        config()->set('my-otp-way.proxy.resend_cooldown_seconds', 0);
+
+        Http::fake([
+            'api.test/v1/otp/send'   => Http::response(['request_id' => 'req-1', 'expires_in' => 300], 202),
+            'api.test/v1/otp/verify' => Http::response([
+                'verified' => false, 'reason' => 'Invalid OTP code.', 'attempts_remaining' => 3,
+            ], 400),
+        ]);
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])->assertStatus(202);
+
+        // Two mistyped codes. Verify's own ceiling is 10 — neither is refused.
+        foreach (['000000', '111111'] as $wrong) {
+            $this->postJson('/my-otp/verify', ['request_id' => 'req-1', 'code' => $wrong])
+                ->assertStatus(422)
+                ->assertJsonPath('error', 'invalid_code');
+        }
+
+        // Three requests have now been made, none of them to /resend.
+        $this->postJson('/my-otp/resend', ['phone' => '+9647701234567'])
+            ->assertStatus(202)
+            ->assertJsonPath('request_id', 'req-1');
+    }
+
+    /**
+     * The other half of the same fix: separating the counters must not turn any
+     * of them off. Resend keeps its own ceiling of 3, and the 429 it throws is
+     * still the frozen `rate_limited` body — the newly separated counter goes
+     * through the same `buildException` override.
+     */
+    public function test_resend_still_enforces_its_own_ceiling(): void
+    {
+        config()->set('my-otp-way.proxy.resend_cooldown_seconds', 0);
+        $this->fakeSendSuccess();
+
+        $this->postJson('/my-otp/send', ['phone' => '+9647701234567'])->assertStatus(202);
+
+        for ($i = 0; $i < 3; $i++) {
+            $this->postJson('/my-otp/resend', ['phone' => '+9647701234567'])->assertStatus(202);
+        }
+
+        $this->assertMatchesTheSharedContract(
+            'rate_limited',
+            $response = $this->postJson('/my-otp/resend', ['phone' => '+9647701234567']),
+        );
+
+        $this->assertGreaterThan(0, $response->json('retry_after'));
+        $this->assertSame(['error', 'retry_after'], array_keys($response->json()));
+
+        // The refused fourth resend never reached the API.
+        Http::assertSentCount(4);
+    }
+
+    /** @see test_resend_still_enforces_its_own_ceiling */
+    public function test_verify_still_enforces_its_own_ceiling(): void
+    {
+        Http::fake(['api.test/*' => Http::response([
+            'verified' => false, 'reason' => 'Invalid OTP code.', 'attempts_remaining' => 3,
+        ], 400)]);
+
+        for ($i = 0; $i < 10; $i++) {
+            $this->postJson('/my-otp/verify', ['request_id' => 'req-1', 'code' => '000000'])
+                ->assertStatus(422);
+        }
+
+        $this->postJson('/my-otp/verify', ['request_id' => 'req-1', 'code' => '000000'])
+            ->assertStatus(429)
+            ->assertJsonPath('error', 'rate_limited');
+
+        Http::assertSentCount(10);
     }
 
     /**

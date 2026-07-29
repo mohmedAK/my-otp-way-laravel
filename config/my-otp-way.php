@@ -17,6 +17,9 @@ return [
         'language' => env('MY_OTP_WAY_LANGUAGE', 'ar'),
         'channel'  => env('MY_OTP_WAY_CHANNEL', 'whatsapp'),
 
+        // One counter per route, per IP (see ProxyThrottle). Raising `send`
+        // does not spend any of `resend`'s or `verify`'s budget, and a user
+        // who mistypes a code twice can still resend.
         'throttle' => [
             'send'   => '5,1',
             'resend' => '3,1',
