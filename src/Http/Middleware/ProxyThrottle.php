@@ -50,8 +50,15 @@ final class ProxyThrottle extends ThrottleRequests
      * `$maxAttempts` names a registered limiter as the named-limiter form, and
      * a fourth argument would silently switch that branch off and be read as
      * `$decayMinutes` instead. A host that sets `proxy.throttle.send` to a
-     * named limiter is a documented case. Overriding the signature leaves the
-     * parent's named-limiter path intact and separates every branch at once.
+     * named limiter is a documented case, and overriding the signature leaves
+     * that path intact rather than disabling it.
+     *
+     * It does not, however, reach into that path. `handleRequestUsingNamedLimiter`
+     * builds its keys from the limiter's own `->by()` and never calls this
+     * method, so two routes pointed at one named limiter still share a counter
+     * — as they should: the host wrote the `->by()` and the host decides the
+     * scope. This override fixes the *default* form, which is the one that was
+     * silently merging the three routes.
      *
      * Whatever the parent produced stays in the key, so per-user and per-IP
      * behaviour — including key hashing — is unchanged.
