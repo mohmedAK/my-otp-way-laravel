@@ -20,6 +20,13 @@ return [
         // One counter per route, per IP (see ProxyThrottle). Raising `send`
         // does not spend any of `resend`'s or `verify`'s budget, and a user
         // who mistypes a code twice can still resend.
+        //
+        // Per-route counting means the per-IP budget is the SUM, so these
+        // values allow 8 paid messages a minute (send + resend), not 5. That
+        // is deliberate: this throttle is defence layer 2, not the spend cap.
+        // `resend_cooldown_seconds` bounds spend per number, and the platform's
+        // own per-recipient limits and the wallet balance bound it per account.
+        // Lower `resend` only if you also accept refusing a human's second tap.
         'throttle' => [
             'send'   => '5,1',
             'resend' => '3,1',
