@@ -13,7 +13,14 @@ return [
 
         // Chosen by the server, never by the mobile client. If the client could
         // name the template it would pick the most expensive one.
-        'template' => env('MY_OTP_WAY_TEMPLATE', 'verify_code'),
+        //
+        // The fallback below is deliberately not a real template name: template
+        // names are approved per account (check /dashboard/templates), and a
+        // plausible-looking default like "verify_code" reads as though it were
+        // guaranteed to exist. It is not. An unset MY_OTP_WAY_TEMPLATE should
+        // fail loudly with an obvious placeholder in the log, not quietly with
+        // a name a developer might assume is real.
+        'template' => env('MY_OTP_WAY_TEMPLATE', 'REPLACE_WITH_YOUR_APPROVED_TEMPLATE_NAME'),
         'language' => env('MY_OTP_WAY_LANGUAGE', 'ar'),
         'channel'  => env('MY_OTP_WAY_CHANNEL', 'whatsapp'),
 

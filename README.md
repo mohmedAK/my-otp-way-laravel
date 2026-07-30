@@ -16,8 +16,14 @@ php artisan vendor:publish --tag=my-otp-way-config
 
 ```dotenv
 MY_OTP_WAY_KEY=your-api-key
-MY_OTP_WAY_TEMPLATE=verify_code
+MY_OTP_WAY_TEMPLATE=your_approved_template_name
 ```
+
+Template names are approved per account — check `/dashboard/templates` for
+yours. There is no universal default: an unset `MY_OTP_WAY_TEMPLATE` falls
+back to an obvious placeholder rather than a name that looks real, so a
+misconfigured proxy fails loudly in your log instead of quietly picking a
+template that may not exist on your account.
 
 Other environment variables the config file reads (all optional, shown with
 their defaults):
@@ -27,7 +33,7 @@ their defaults):
 | `MY_OTP_WAY_URL` | `https://myotpway.online/api/v1` | Base URL of the API |
 | `MY_OTP_WAY_KEY` | — | Your API key, sent as `X-API-Key` |
 | `MY_OTP_WAY_TIMEOUT` | `10` | HTTP timeout in seconds |
-| `MY_OTP_WAY_TEMPLATE` | `verify_code` | Template the **proxy routes** send (see below) |
+| `MY_OTP_WAY_TEMPLATE` | *(placeholder — see above)* | Template the **proxy routes** send (see below) |
 | `MY_OTP_WAY_LANGUAGE` | `ar` | Language the proxy routes send |
 | `MY_OTP_WAY_CHANNEL` | `whatsapp` | Channel the proxy routes send |
 
@@ -36,7 +42,7 @@ their defaults):
 ```php
 use MyOtpWay\Laravel\Facades\MyOtpWay;
 
-$result = MyOtpWay::otp()->send(to: '+9647701234567', template: 'verify_code', language: 'ar');
+$result = MyOtpWay::otp()->send(to: '+9647701234567', template: 'your_approved_template_name', language: 'ar');
 
 if (MyOtpWay::otp()->verify($result->requestId, $code)->verified) {
     // the phone number is confirmed
